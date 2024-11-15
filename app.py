@@ -3,6 +3,7 @@ from flask_sqlalchemy import SQLAlchemy
 from flask_marshmallow import Marshmallow
 from marshmallow import fields, ValidationError
 import re
+from datetime import date, timedelta
 
 app = Flask(__name__)
 app.config['SQLALCHEMY_DATABASE_URI'] = 'mysql+mysqlconnector://root:password@localhost/e_commerce_project'
@@ -50,8 +51,6 @@ class CustomerAccount(db.Model):
 
 class OrderSchema(ma.Schema):
     customer_id = fields.Integer(required=True)
-    product_id = fields.Integer(required=True)
-    quantity = fields.Integer(required=True)
     shipping_date = fields.Date(required=True)
     arrival_date = fields.Date(required=True)
     order_status = fields.String(required=True)
@@ -62,17 +61,28 @@ class OrderSchema(ma.Schema):
 order_schema = OrderSchema()
 orders_schema = OrderSchema(many=True)
 
+class OrderProductSchema(ma.Schema):
+    order_id = fields.Integer(required=True)
+    products_id = fields.Integer(required=True)
+    quantity = fields.Integer(required=True)
+
+order_product_schema = OrderProductSchema()
+order_products_schema = OrderProductSchema(many=True)
+
+
+order_product = db.Table("OrderProduct", 
+db.Column("order_id", db.Integer, db.ForeignKey("Orders.id"), primary_key=True), 
+db.Column("product_id", db.Integer, db.ForeignKey("Products.id"), primary_key=True),
+db.Column("quantity", db.Integer))
+
 class Order(db.Model):
     __tablename__ = "Orders"
     id = db.Column(db.Integer, primary_key=True)
     customer_id = db.Column(db.Integer, db.ForeignKey('Customers.id'), nullable = False)
-    product_id = db.Column(db.Integer, db.ForeignKey('Products.id'), nullable = False)
-    quantity = db.Column(db.Integer, nullable = False)
     shipping_date = db.Column(db.Date, nullable = False)
     arrival_date = db.Column(db.Date, nullable = False)
-    order_status = db.Column(db.String, nullable = False)
-    customer = db.relationship('Customer', backref='order')
-    product = db.relationship('Product', backref='order')
+    order_status = db.Column(db.String(20), nullable = False)
+    products = db.relationship("Product", secondary=order_product, backref=db.backref("orders_products"))
     
 
 class ProductSchema(ma.Schema):
@@ -89,9 +99,10 @@ products_schema = ProductSchema(many=True)
 class Product(db.Model):
     __tablename__ = "Products"
     id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String, nullable = False)
-    price = db.Column(db.String, nullable = False)
+    name = db.Column(db.String(255), nullable = False)
+    price = db.Column(db.String(100), nullable = False)
     stock = db.Column(db.Integer, nullable = False)
+    orders = db.relationship("Order", secondary=order_product, backref=db.backref("products_orders"))
 
 # Customers and Customer Accounts
 
@@ -316,5 +327,55 @@ def delete_product(id):
     db.session.commit()
     return jsonify({'message': "Product removed successfully."}), 200
 
+# Orders
+
+@app.route("/orders", methods=['POST'])
+def place_order():
+    order_data = request.get_json()
+    try:
+        shipping_date = date.today()
+        arrival_date = shipping_date + timedelta(days=5)
+        order_status = 'shipping'
+        new_order = Order(customer_id=order_data['customer_id'], shipping_date=shipping_date, \
+        arrival_date=arrival_date, order_status=order_status)
+        db.session.add(new_order)
+        db.session.commit()
+        for item in order_data["items"]:
+            current_product = Product.query.get_or_404(item["product_id"])
+            if item["quantity"] > current_product.stock:
+                return jsonify({"message": "Not enough stock for that item."})
+            db.session.execute(order_product.insert().values(
+                order_id = new_order.id,
+                product_id = item["product_id"],
+                quantity = item["quantity"]
+                ))
+            current_product.stock -= item["quantity"]
+            db.session.add(current_product)
+            db.session.commit()
+        return jsonify({"message": "Order added successfully."}), 200
+    
+
+    except ValidationError as e:
+        return jsonify(e.messages), 400
+
+@app.route("/orders/<int:id>", methods=["GET"])
+def get_order_details(id):
+    order = Order.query.get_or_404(id)
+    if not order:
+        return jsonify({"message": "Order not found."}), 404
+    return order_schema.jsonify(order)
+
+@app.route("/products/review-stock/<int:id>", methods=["GET"])
+def review_stock(id):
+    product = Product.query.get_or_404(id)
+    if not product:
+        return jsonify({"message": "Product not found."}), 404
+    if product.stock <= 5:
+        return jsonify({"message": f"Stock: {product.stock}\nMust be restocked."})
+    return jsonify({"message": f"Stock: {product.stock}\nStock OK for now."})
+
+
 if __name__ == '__main__':
+    with app.app_context():
+        db.create_all()
     app.run(debug=True)
